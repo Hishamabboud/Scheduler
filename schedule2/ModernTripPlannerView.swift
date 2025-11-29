@@ -9,11 +9,13 @@ import SwiftUI
 import MapKit
 
 struct ModernTripPlannerView: View {
+    @StateObject private var tripsService = NSTripsService()
     @State private var fromAddress = ""
     @State private var toAddress = ""
     @State private var departureTime = Date()
     @State private var selectedTransportMode: TripTransportMode = .train
     @State private var tripResult: ModernTripResult?
+    @State private var liveTripOptions: [LiveTripResult] = []
     @State private var isLoading = false
     @State private var errorMessage = ""
     @State private var showingMap = false
@@ -164,13 +166,13 @@ struct ModernTripPlannerView: View {
             // Plan journey button
             planJourneyButton
                 .padding(.horizontal, 20)
-            
-            // Results section
-            if let result = tripResult {
-                tripResultsSection(result)
+
+            // Live results section
+            if !liveTripOptions.isEmpty {
+                liveResultsSection
                     .padding(.horizontal, 20)
             }
-            
+
             if !errorMessage.isEmpty {
                 errorSection
                     .padding(.horizontal, 20)
@@ -309,34 +311,69 @@ struct ModernTripPlannerView: View {
     }
     
     private func planTrip() {
-        // Implement trip planning logic
         isLoading = true
         errorMessage = ""
-        
-        // Simulate API call
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            isLoading = false
-            // Create mock result
-            tripResult = ModernTripResult(
-                duration: "45 min",
-                price: "€12.40",
-                transfers: 1,
-                steps: [
-                    ModernTripStep(
-                        mode: .train,
-                        from: fromAddress,
-                        to: toAddress,
-                        duration: "42 min",
-                        departure: departureTime,
-                        arrival: departureTime.addingTimeInterval(2520),
-                        line: "IC 1234"
-                    )
-                ]
+        liveTripOptions = []
+        tripResult = nil
+
+        Task {
+            // Fetch live trip options from NS API
+            await tripsService.fetchTrips(
+                from: fromAddress,
+                to: toAddress,
+                dateTime: departureTime
             )
+
+            await MainActor.run {
+                self.liveTripOptions = tripsService.tripOptions
+
+                if let error = tripsService.error {
+                    self.errorMessage = error
+                }
+
+                self.isLoading = false
+            }
         }
     }
     
-    // MARK: - Trip Results Section
+    // MARK: - Live Results Section
+    private var liveResultsSection: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Image(systemName: tripsService.isUsingLiveData ? "antenna.radiowaves.left.and.right" : "info.circle")
+                            .foregroundColor(tripsService.isUsingLiveData ? .green : .orange)
+                            .font(.title3)
+
+                        Text("Journey Options")
+                            .font(.system(size: 20, weight: .semibold))
+                    }
+
+                    Text(tripsService.isUsingLiveData ? "Live data from NS" : "Demo data")
+                        .font(.caption)
+                        .foregroundColor(tripsService.isUsingLiveData ? .green : .orange)
+                }
+
+                Spacer()
+
+                Button("View on Map") {
+                    showingMap = true
+                }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundColor(.blue)
+            }
+
+            ForEach(liveTripOptions) { trip in
+                ModernLiveTripCard(trip: trip)
+            }
+        }
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+    }
+
+    // MARK: - Trip Results Section (Legacy)
     private func tripResultsSection(_ result: ModernTripResult) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -349,7 +386,7 @@ struct ModernTripPlannerView: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.blue)
             }
-            
+
             TripResultCard(result: result)
         }
         .padding(20)
@@ -687,6 +724,239 @@ struct ModernTripStep {
     let departure: Date
     let arrival: Date
     let line: String
+}
+
+// MARK: - Modern Live Trip Card
+struct ModernLiveTripCard: View {
+    let trip: LiveTripResult
+    @State private var isExpanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Main summary row
+            Button(action: { withAnimation(.spring(response: 0.3)) { isExpanded.toggle() } }) {
+                HStack(spacing: 12) {
+                    // Status indicator
+                    Circle()
+                        .fill(trip.status.color)
+                        .frame(width: 12, height: 12)
+
+                    // Times
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text(trip.departureTime, style: .time)
+                                .font(.system(size: 16, weight: .bold))
+
+                            Image(systemName: "arrow.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+
+                            Text(trip.arrivalTime, style: .time)
+                                .font(.system(size: 16, weight: .bold))
+                        }
+
+                        HStack(spacing: 6) {
+                            Text(trip.formattedDuration)
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+
+                            Text("•")
+                                .foregroundColor(.secondary)
+
+                            if trip.transfers == 0 {
+                                Text("Direct")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.green)
+                            } else {
+                                Text("\(trip.transfers) transfer\(trip.transfers > 1 ? "s" : "")")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    Spacer()
+
+                    // Price
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(trip.formattedPrice)
+                            .font(.system(size: 16, weight: .bold))
+                            .foregroundColor(.green)
+
+                        if trip.isOptimal {
+                            Text("Best")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.blue)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(.blue.opacity(0.1), in: Capsule())
+                        }
+                    }
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            // Warnings
+            if !trip.warnings.isEmpty && !trip.warnings.first!.contains("Demo data") {
+                ForEach(trip.warnings.filter { !$0.contains("Demo data") }.prefix(1), id: \.self) { warning in
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 12))
+                        Text(warning)
+                            .font(.system(size: 12))
+                            .foregroundColor(.orange)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            // Expanded details
+            if isExpanded {
+                Divider()
+                    .padding(.vertical, 4)
+
+                // Legs
+                ForEach(Array(trip.legs.enumerated()), id: \.offset) { index, leg in
+                    ModernLegView(leg: leg, isLast: index == trip.legs.count - 1)
+                }
+
+                // Crowd info
+                if let crowd = trip.crowdForecast {
+                    HStack(spacing: 6) {
+                        Image(systemName: crowdIcon(for: crowd))
+                            .font(.system(size: 12))
+                            .foregroundColor(crowdColor(for: crowd))
+                        Text("Expected crowd: \(crowd.capitalized)")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 4)
+                }
+            }
+        }
+        .padding(16)
+        .background(trip.status.color.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(trip.status.color.opacity(0.2), lineWidth: 1)
+        )
+    }
+
+    private func crowdIcon(for forecast: String) -> String {
+        switch forecast.uppercased() {
+        case "LOW": return "person"
+        case "MEDIUM": return "person.2"
+        case "HIGH": return "person.3"
+        default: return "person.2"
+        }
+    }
+
+    private func crowdColor(for forecast: String) -> Color {
+        switch forecast.uppercased() {
+        case "LOW": return .green
+        case "MEDIUM": return .orange
+        case "HIGH": return .red
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - Modern Leg View
+struct ModernLegView: View {
+    let leg: LiveTripLeg
+    let isLast: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // Timeline
+            VStack(spacing: 2) {
+                Circle()
+                    .fill(leg.mode.color)
+                    .frame(width: 10, height: 10)
+
+                if !isLast {
+                    Rectangle()
+                        .fill(leg.mode.color.opacity(0.3))
+                        .frame(width: 2, height: 35)
+                }
+            }
+            .frame(width: 14)
+
+            // Content
+            VStack(alignment: .leading, spacing: 4) {
+                // Transport line info
+                HStack(spacing: 6) {
+                    Image(systemName: leg.mode.systemImage)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(leg.mode.color)
+
+                    Text(leg.lineName)
+                        .font(.system(size: 13, weight: .semibold))
+
+                    if let number = leg.lineNumber {
+                        Text(number)
+                            .font(.system(size: 11))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.blue.opacity(0.1), in: Capsule())
+                    }
+
+                    Spacer()
+
+                    if leg.hasDelay {
+                        Text("+\(leg.delayMinutes)m")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.orange)
+                    }
+                }
+
+                // From
+                HStack(spacing: 6) {
+                    Text(leg.departureTime, style: .time)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .frame(width: 45, alignment: .leading)
+
+                    Text(leg.fromStation)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+
+                    if let track = leg.actualDepartureTrack ?? leg.plannedDepartureTrack {
+                        Spacer()
+                        Text("Pl. \(track)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(leg.trackChanged ? .orange : .secondary)
+                    }
+                }
+
+                // To
+                HStack(spacing: 6) {
+                    Text(leg.arrivalTime, style: .time)
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .frame(width: 45, alignment: .leading)
+
+                    Text(leg.toStation)
+                        .font(.system(size: 12))
+                        .lineLimit(1)
+
+                    if let track = leg.actualArrivalTrack ?? leg.plannedArrivalTrack {
+                        Spacer()
+                        Text("Pl. \(track)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
 }
 
 #Preview {
