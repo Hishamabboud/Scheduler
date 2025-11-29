@@ -12,6 +12,8 @@ import Combine
 struct TripPlannerView: View {
     @StateObject private var trafficService = RealTimeTrafficService()
     @StateObject private var tripsService = NSTripsService()
+    @StateObject private var fromSearchCompleter = AddressSearchCompleter()
+    @StateObject private var toSearchCompleter = AddressSearchCompleter()
     @State private var fromAddress = ""
     @State private var toAddress = ""
     @State private var departureTime = Date()
@@ -25,6 +27,10 @@ struct TripPlannerView: View {
     @State private var showingQuickActions = false
     @State private var selectedQuickTrip: QuickTrip?
     @State private var showLiveResults = true
+    @State private var showFromSuggestions = false
+    @State private var showToSuggestions = false
+    @FocusState private var fromFieldFocused: Bool
+    @FocusState private var toFieldFocused: Bool
     
     // Map-related state
     @State private var mapRegion = MKCoordinateRegion(
@@ -268,7 +274,7 @@ struct TripPlannerView: View {
                     .font(.headline)
                     .fontWeight(.semibold)
                 Spacer()
-                
+
                 Button(action: swapAddresses) {
                     Image(systemName: "arrow.up.arrow.down")
                         .font(.system(size: 16, weight: .semibold))
@@ -279,30 +285,80 @@ struct TripPlannerView: View {
                 }
                 .disabled(fromAddress.isEmpty && toAddress.isEmpty)
             }
-            
-            VStack(spacing: 16) {
-                // From address
-                AddressInputField(
-                    title: "From",
-                    address: $fromAddress,
-                    placeholder: "Enter departure location",
-                    icon: "location.circle.fill",
-                    iconColor: .green,
-                    onAddressPicker: {
-                        isSelectingFromAddress = true
-                        showingAddressPicker = true
-                    },
-                    onMapShow: {
-                        showingMap = true
-                        geocodeAddresses()
+
+            VStack(spacing: 12) {
+                // From address with inline suggestions
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "location.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 16, weight: .medium))
+                        Text("From")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
                     }
-                )
-                
+
+                    TextField("Enter departure location", text: $fromAddress)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.subheadline)
+                        .focused($fromFieldFocused)
+                        .onChange(of: fromAddress) { _, newValue in
+                            fromSearchCompleter.search(query: newValue)
+                            showFromSuggestions = !newValue.isEmpty && fromFieldFocused
+                        }
+                        .onChange(of: fromFieldFocused) { _, focused in
+                            showFromSuggestions = focused && !fromAddress.isEmpty && !fromSearchCompleter.suggestions.isEmpty
+                        }
+
+                    // Inline suggestions for From
+                    if showFromSuggestions && !fromSearchCompleter.suggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(fromSearchCompleter.suggestions.prefix(5), id: \.self) { suggestion in
+                                Button(action: {
+                                    fromAddress = suggestion.title + (suggestion.subtitle.isEmpty ? "" : ", \(suggestion.subtitle)")
+                                    showFromSuggestions = false
+                                    fromFieldFocused = false
+                                    Task { await geocodeFromAddress() }
+                                }) {
+                                    HStack {
+                                        Image(systemName: "mappin.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.caption)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(suggestion.title)
+                                                .font(.subheadline)
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            if !suggestion.subtitle.isEmpty {
+                                                Text(suggestion.subtitle)
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.vertical, 8)
+                                    .padding(.horizontal, 12)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if suggestion != fromSearchCompleter.suggestions.prefix(5).last {
+                                    Divider()
+                                }
+                            }
+                        }
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2), lineWidth: 1))
+                    }
+                }
+
                 // Connecting line
                 HStack {
                     Spacer()
                     VStack(spacing: 4) {
-                        ForEach(0..<3) { _ in
+                        ForEach(0..<3, id: \.self) { _ in
                             Circle()
                                 .fill(.secondary.opacity(0.4))
                                 .frame(width: 3, height: 3)
@@ -310,35 +366,155 @@ struct TripPlannerView: View {
                     }
                     Spacer()
                 }
-                
-                // To address
-                AddressInputField(
-                    title: "To",
-                    address: $toAddress,
-                    placeholder: "Enter destination",
-                    icon: "location.fill",
-                    iconColor: .red,
-                    onAddressPicker: {
-                        isSelectingFromAddress = false
-                        showingAddressPicker = true
-                    },
-                    onMapShow: {
-                        showingMap = true
-                        geocodeAddresses()
+
+                // To address with inline suggestions
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Image(systemName: "location.fill")
+                            .foregroundColor(.red)
+                            .font(.system(size: 16, weight: .medium))
+                        Text("To")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
                     }
-                )
+
+                    TextField("Enter destination", text: $toAddress)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.subheadline)
+                        .focused($toFieldFocused)
+                        .onChange(of: toAddress) { _, newValue in
+                            toSearchCompleter.search(query: newValue)
+                            showToSuggestions = !newValue.isEmpty && toFieldFocused
+                        }
+                        .onChange(of: toFieldFocused) { _, focused in
+                            showToSuggestions = focused && !toAddress.isEmpty && !toSearchCompleter.suggestions.isEmpty
+                        }
+
+                    // Inline suggestions for To
+                    if showToSuggestions && !toSearchCompleter.suggestions.isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(toSearchCompleter.suggestions.prefix(5), id: \.self) { suggestion in
+                                Button(action: {
+                                    toAddress = suggestion.title + (suggestion.subtitle.isEmpty ? "" : ", \(suggestion.subtitle)")
+                                    showToSuggestions = false
+                                    toFieldFocused = false
+                                    Task { await geocodeToAddress() }
+                                }) {
+                                    HStack {
+                                        Image(systemName: "mappin.circle.fill")
+                                            .foregroundColor(.blue)
+                                            .font(.caption)
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(suggestion.title)
+                                                .font(.subheadline)
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            if !suggestion.subtitle.isEmpty {
+                                                Text(suggestion.subtitle)
+                                                    .font(.caption)
+                                                    .foregroundColor(.secondary)
+                                                    .lineLimit(1)
+                                            }
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.vertical, 8)
+                                    .padding(.horizontal, 12)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+
+                                if suggestion != toSearchCompleter.suggestions.prefix(5).last {
+                                    Divider()
+                                }
+                            }
+                        }
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.secondary.opacity(0.2), lineWidth: 1))
+                    }
+                }
+            }
+
+            // Mini map preview
+            if fromLocation != nil || toLocation != nil {
+                miniMapPreview
             }
         }
         .padding(20)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
         .padding(.horizontal, 16)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
-        .onChange(of: fromAddress) { _ in
+        .onChange(of: fromAddress) { _, _ in
             Task { await geocodeFromAddress() }
         }
-        .onChange(of: toAddress) { _ in
+        .onChange(of: toAddress) { _, _ in
             Task { await geocodeToAddress() }
         }
+    }
+
+    // MARK: - Mini Map Preview
+    private var miniMapPreview: some View {
+        ZStack {
+            Map(coordinateRegion: .constant(calculateMapRegion()), annotationItems: mapAnnotations) { annotation in
+                MapMarker(coordinate: annotation.coordinate, tint: annotation.isStart ? .green : .red)
+            }
+            .frame(height: 120)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .disabled(true)
+
+            // Overlay button to expand
+            VStack {
+                Spacer()
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        showingMap = true
+                        geocodeAddresses()
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                .font(.caption)
+                            Text("Expand")
+                                .font(.caption)
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(.blue, in: Capsule())
+                    }
+                    .padding(8)
+                }
+            }
+        }
+    }
+
+    private var mapAnnotations: [MapPointAnnotation] {
+        var annotations: [MapPointAnnotation] = []
+        if let from = fromLocation {
+            annotations.append(MapPointAnnotation(coordinate: from, isStart: true))
+        }
+        if let to = toLocation {
+            annotations.append(MapPointAnnotation(coordinate: to, isStart: false))
+        }
+        return annotations
+    }
+
+    private func calculateMapRegion() -> MKCoordinateRegion {
+        if let from = fromLocation, let to = toLocation {
+            let centerLat = (from.latitude + to.latitude) / 2
+            let centerLon = (from.longitude + to.longitude) / 2
+            let latDelta = abs(from.latitude - to.latitude) * 1.5 + 0.02
+            let lonDelta = abs(from.longitude - to.longitude) * 1.5 + 0.02
+            return MKCoordinateRegion(
+                center: CLLocationCoordinate2D(latitude: centerLat, longitude: centerLon),
+                span: MKCoordinateSpan(latitudeDelta: max(latDelta, 0.02), longitudeDelta: max(lonDelta, 0.02))
+            )
+        } else if let from = fromLocation {
+            return MKCoordinateRegion(center: from, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
+        } else if let to = toLocation {
+            return MKCoordinateRegion(center: to, span: MKCoordinateSpan(latitudeDelta: 0.05, longitudeDelta: 0.05))
+        }
+        return mapRegion
     }
     
     // MARK: - Time Selection Card
@@ -825,7 +1001,8 @@ struct TripPlannerView: View {
             await tripsService.fetchTrips(
                 from: fromAddress,
                 to: toAddress,
-                dateTime: departureTime
+                dateTime: departureTime,
+                transportMode: selectedTransportMode
             )
 
             // Also analyze for delays
@@ -2232,6 +2409,52 @@ struct LiveTripLegRow: View {
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Map Point Annotation
+struct MapPointAnnotation: Identifiable {
+    let id = UUID()
+    let coordinate: CLLocationCoordinate2D
+    let isStart: Bool
+}
+
+// MARK: - Address Search Completer
+class AddressSearchCompleter: NSObject, ObservableObject, MKLocalSearchCompleterDelegate {
+    @Published var suggestions: [MKLocalSearchCompletion] = []
+    private let completer = MKLocalSearchCompleter()
+    private var debounceTimer: Timer?
+
+    override init() {
+        super.init()
+        completer.delegate = self
+        completer.resultTypes = [.address, .pointOfInterest]
+        // Focus on Netherlands region
+        completer.region = MKCoordinateRegion(
+            center: CLLocationCoordinate2D(latitude: 52.1326, longitude: 5.2913),
+            span: MKCoordinateSpan(latitudeDelta: 3.0, longitudeDelta: 3.0)
+        )
+    }
+
+    func search(query: String) {
+        debounceTimer?.invalidate()
+        debounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+            if query.count >= 2 {
+                self?.completer.queryFragment = query
+            } else {
+                self?.suggestions = []
+            }
+        }
+    }
+
+    func completerDidUpdateResults(_ completer: MKLocalSearchCompleter) {
+        DispatchQueue.main.async {
+            self.suggestions = completer.results
+        }
+    }
+
+    func completer(_ completer: MKLocalSearchCompleter, didFailWithError error: Error) {
+        print("Search completer error: \(error.localizedDescription)")
     }
 }
 

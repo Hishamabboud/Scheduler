@@ -322,7 +322,7 @@ class NSTripsService: ObservableObject {
 
     // MARK: - Fetch Live Trips
 
-    func fetchTrips(from: String, to: String, dateTime: Date, isArrival: Bool = false) async {
+    func fetchTrips(from: String, to: String, dateTime: Date, transportMode: TripTransportMode = .train, isArrival: Bool = false) async {
         isLoading = true
         error = nil
         tripOptions = []
@@ -332,21 +332,41 @@ class NSTripsService: ObservableObject {
         let fromStation = convertToStationCode(from)
         let toStation = convertToStationCode(to)
 
-        print("🚆 Fetching live trips from \(fromStation) to \(toStation)")
+        let modeEmoji = transportMode == .train ? "🚆" : (transportMode == .bus ? "🚌" : "🚇")
+        print("\(modeEmoji) Fetching live \(transportMode.displayName) trips from \(fromStation) to \(toStation)")
 
         // Format the datetime for API
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         let dateTimeString = formatter.string(from: dateTime)
 
-        // Build the URL
+        // Build the URL with transport mode filters
         var urlComponents = URLComponents(string: "https://gateway.apiportal.ns.nl/reisinformatie-api/api/v3/trips")!
-        urlComponents.queryItems = [
+        var queryItems = [
             URLQueryItem(name: "fromStation", value: fromStation),
             URLQueryItem(name: "toStation", value: toStation),
             URLQueryItem(name: "dateTime", value: dateTimeString),
             URLQueryItem(name: "searchForArrival", value: isArrival ? "true" : "false")
         ]
+
+        // Add transport mode specific filters
+        // NS API supports product filtering to include different transport types
+        switch transportMode {
+        case .train:
+            // Only train services
+            queryItems.append(URLQueryItem(name: "product", value: "TRAIN"))
+        case .bus:
+            // Bus only - but NS API focuses on trains, so we'll include bus connections
+            queryItems.append(URLQueryItem(name: "product", value: "BUS"))
+            // Also try with all products as bus-only may not return results
+            queryItems.append(URLQueryItem(name: "travelAssistanceTransferTime", value: "0"))
+        case .mixed:
+            // All transport types - train, bus, metro, tram, ferry
+            // Don't filter - get all options including bus, tram, metro connections
+            queryItems.append(URLQueryItem(name: "travelAssistanceTransferTime", value: "0"))
+        }
+
+        urlComponents.queryItems = queryItems
 
         guard let url = urlComponents.url else {
             error = "Invalid URL"
@@ -367,7 +387,7 @@ class NSTripsService: ObservableObject {
                 print("📊 Status code: \(httpResponse.statusCode)")
 
                 if httpResponse.statusCode == 200 {
-                    let trips = try parseTripsResponse(data: data, from: from, to: to)
+                    let trips = try parseTripsResponse(data: data, from: from, to: to, transportMode: transportMode)
                     tripOptions = trips
                     isUsingLiveData = true
                     print("✅ Successfully fetched \(trips.count) live trip options")
@@ -377,7 +397,7 @@ class NSTripsService: ObservableObject {
                     print("❌ API Error: \(responseString)")
 
                     // Fall back to demo data
-                    tripOptions = createDemoTrips(from: from, to: to, dateTime: dateTime)
+                    tripOptions = createDemoTrips(from: from, to: to, dateTime: dateTime, transportMode: transportMode)
                     error = "Using demo data (API returned status \(httpResponse.statusCode))"
                 }
             }
@@ -386,7 +406,7 @@ class NSTripsService: ObservableObject {
             self.error = "Network error: \(error.localizedDescription)"
 
             // Fall back to demo data
-            tripOptions = createDemoTrips(from: from, to: to, dateTime: dateTime)
+            tripOptions = createDemoTrips(from: from, to: to, dateTime: dateTime, transportMode: transportMode)
         }
 
         isLoading = false
@@ -394,7 +414,7 @@ class NSTripsService: ObservableObject {
 
     // MARK: - Parse Response
 
-    private func parseTripsResponse(data: Data, from: String, to: String) throws -> [LiveTripResult] {
+    private func parseTripsResponse(data: Data, from: String, to: String, transportMode: TripTransportMode = .train) throws -> [LiveTripResult] {
         var results: [LiveTripResult] = []
 
         do {
@@ -545,21 +565,41 @@ class NSTripsService: ObservableObject {
         if let product = legData["product"] as? [String: Any] {
             lineNumber = product["number"] as? String
             operatorName = product["operatorName"] as? String
-            let categoryCode = product["categoryCode"] as? String ?? ""
+            let categoryCode = (product["categoryCode"] as? String ?? "").uppercased()
+            let productType = (product["type"] as? String ?? "").uppercased()
+            let shortName = (product["shortCategoryName"] as? String ?? "").uppercased()
             lineName = product["displayName"] as? String ?? product["longCategoryName"] as? String ?? lineName
 
-            // Determine mode based on category
-            if categoryCode.lowercased().contains("bus") {
+            // Determine mode based on category code and product type
+            // NS API uses various codes: IC, SPR, IC Direct, BUS, METRO, TRAM, FERRY, etc.
+            if categoryCode.contains("BUS") || productType.contains("BUS") || shortName.contains("BUS") {
                 mode = .bus
-            } else if categoryCode.lowercased().contains("metro") || categoryCode.lowercased().contains("tram") {
+                lineName = "Bus \(lineNumber ?? "")"
+            } else if categoryCode.contains("METRO") || productType.contains("METRO") || shortName.contains("METRO") {
                 mode = .mixed
+                lineName = "Metro \(lineNumber ?? "")"
+            } else if categoryCode.contains("TRAM") || productType.contains("TRAM") || shortName.contains("TRAM") {
+                mode = .mixed
+                lineName = "Tram \(lineNumber ?? "")"
+            } else if categoryCode.contains("FERRY") || productType.contains("FERRY") || shortName.contains("FERRY") {
+                mode = .mixed
+                lineName = "Ferry"
+            } else if categoryCode.contains("WALK") || productType.contains("WALK") {
+                mode = .mixed
+                lineName = "Walk"
+            } else {
+                // Default to train for IC, SPR, IC Direct, etc.
+                mode = .train
             }
         }
 
-        // Check travel type
+        // Check travel type for walking segments
         let travelType = legData["travelType"] as? String ?? ""
-        if travelType == "WALK" {
+        if travelType.uppercased() == "WALK" {
             lineName = "Walk"
+            mode = .mixed
+        } else if travelType.uppercased() == "TRANSFER" {
+            lineName = "Transfer"
             mode = .mixed
         }
 
@@ -695,12 +735,23 @@ class NSTripsService: ObservableObject {
 
     // MARK: - Demo Data Fallback
 
-    private func createDemoTrips(from: String, to: String, dateTime: Date) -> [LiveTripResult] {
-        print("📋 Creating demo trip data as fallback")
+    private func createDemoTrips(from: String, to: String, dateTime: Date, transportMode: TripTransportMode = .train) -> [LiveTripResult] {
+        print("📋 Creating demo \(transportMode.displayName) trip data as fallback")
 
         let baseDuration = calculateEstimatedDuration(from: from, to: to)
         let basePrice = calculateEstimatedPrice(from: from, to: to)
 
+        switch transportMode {
+        case .train:
+            return createTrainDemoTrips(from: from, to: to, dateTime: dateTime, baseDuration: baseDuration, basePrice: basePrice)
+        case .bus:
+            return createBusDemoTrips(from: from, to: to, dateTime: dateTime, baseDuration: baseDuration, basePrice: basePrice)
+        case .mixed:
+            return createMixedDemoTrips(from: from, to: to, dateTime: dateTime, baseDuration: baseDuration, basePrice: basePrice)
+        }
+    }
+
+    private func createTrainDemoTrips(from: String, to: String, dateTime: Date, baseDuration: Int, basePrice: Int) -> [LiveTripResult] {
         return [
             // Option 1: Direct/fastest
             LiveTripResult(
@@ -796,15 +847,123 @@ class NSTripsService: ObservableObject {
                 crowdForecast: "MEDIUM",
                 isOptimal: false,
                 warnings: ["Demo data - configure NS API key for live results"]
-            ),
-            // Option 3: Later departure
+            )
+        ]
+    }
+
+    private func createBusDemoTrips(from: String, to: String, dateTime: Date, baseDuration: Int, basePrice: Int) -> [LiveTripResult] {
+        let busDuration = Int(Double(baseDuration) * 1.3) // Buses are typically 30% slower
+        let busPrice = Int(Double(basePrice) * 0.7) // Buses are typically 30% cheaper
+
+        return [
+            // Option 1: Direct bus
             LiveTripResult(
                 from: from,
                 to: to,
-                departureTime: dateTime.addingTimeInterval(30 * 60),
-                arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 30) * 60),
-                durationMinutes: baseDuration,
+                departureTime: dateTime,
+                arrivalTime: dateTime.addingTimeInterval(Double(busDuration) * 60),
+                durationMinutes: busDuration,
                 transfers: 0,
+                priceInCents: busPrice,
+                status: .normal,
+                legs: [
+                    LiveTripLeg(
+                        mode: .bus,
+                        lineName: "Bus \(Int.random(in: 100...999))",
+                        lineNumber: "\(Int.random(in: 100...999))",
+                        operatorName: "GVB",
+                        direction: to,
+                        fromStation: from,
+                        toStation: to,
+                        departureTime: dateTime,
+                        arrivalTime: dateTime.addingTimeInterval(Double(busDuration) * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: busDuration,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "MEDIUM",
+                        intermediateStops: [],
+                        messages: []
+                    )
+                ],
+                crowdForecast: "MEDIUM",
+                isOptimal: true,
+                warnings: ["Demo data - configure NS API key for live results"]
+            ),
+            // Option 2: Bus with transfer
+            LiveTripResult(
+                from: from,
+                to: to,
+                departureTime: dateTime.addingTimeInterval(10 * 60),
+                arrivalTime: dateTime.addingTimeInterval(Double(busDuration + 25) * 60),
+                durationMinutes: busDuration + 25,
+                transfers: 1,
+                priceInCents: busPrice,
+                status: .normal,
+                legs: [
+                    LiveTripLeg(
+                        mode: .bus,
+                        lineName: "Bus \(Int.random(in: 100...999))",
+                        lineNumber: "\(Int.random(in: 100...999))",
+                        operatorName: "Connexxion",
+                        direction: "Station",
+                        fromStation: from,
+                        toStation: "Central Station",
+                        departureTime: dateTime.addingTimeInterval(10 * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(busDuration / 2 + 10) * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: busDuration / 2,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "MEDIUM",
+                        intermediateStops: [],
+                        messages: []
+                    ),
+                    LiveTripLeg(
+                        mode: .bus,
+                        lineName: "Bus \(Int.random(in: 100...999))",
+                        lineNumber: "\(Int.random(in: 100...999))",
+                        operatorName: "Arriva",
+                        direction: to,
+                        fromStation: "Central Station",
+                        toStation: to,
+                        departureTime: dateTime.addingTimeInterval(Double(busDuration / 2 + 20) * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(busDuration + 25) * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: busDuration / 2 + 5,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "LOW",
+                        intermediateStops: [],
+                        messages: []
+                    )
+                ],
+                crowdForecast: "MEDIUM",
+                isOptimal: false,
+                warnings: ["Demo data - configure NS API key for live results"]
+            )
+        ]
+    }
+
+    private func createMixedDemoTrips(from: String, to: String, dateTime: Date, baseDuration: Int, basePrice: Int) -> [LiveTripResult] {
+        return [
+            // Option 1: Train + Metro
+            LiveTripResult(
+                from: from,
+                to: to,
+                departureTime: dateTime,
+                arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 10) * 60),
+                durationMinutes: baseDuration + 10,
+                transfers: 1,
                 priceInCents: basePrice,
                 status: .normal,
                 legs: [
@@ -813,11 +972,148 @@ class NSTripsService: ObservableObject {
                         lineName: "Intercity",
                         lineNumber: "IC \(Int.random(in: 1000...9999))",
                         operatorName: "NS",
+                        direction: "Amsterdam Centraal",
+                        fromStation: from,
+                        toStation: "Amsterdam Centraal",
+                        departureTime: dateTime,
+                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration) * 60),
+                        plannedDepartureTrack: "\(Int.random(in: 1...15))",
+                        actualDepartureTrack: "\(Int.random(in: 1...15))",
+                        plannedArrivalTrack: "\(Int.random(in: 1...15))",
+                        actualArrivalTrack: "\(Int.random(in: 1...15))",
+                        durationMinutes: baseDuration,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "MEDIUM",
+                        intermediateStops: [],
+                        messages: []
+                    ),
+                    LiveTripLeg(
+                        mode: .mixed,
+                        lineName: "Metro 52",
+                        lineNumber: "52",
+                        operatorName: "GVB",
+                        direction: to,
+                        fromStation: "Amsterdam Centraal",
+                        toStation: to,
+                        departureTime: dateTime.addingTimeInterval(Double(baseDuration + 3) * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 10) * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: 7,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "LOW",
+                        intermediateStops: [],
+                        messages: []
+                    )
+                ],
+                crowdForecast: "MEDIUM",
+                isOptimal: true,
+                warnings: ["Demo data - configure NS API key for live results"]
+            ),
+            // Option 2: Bus + Train + Tram
+            LiveTripResult(
+                from: from,
+                to: to,
+                departureTime: dateTime.addingTimeInterval(5 * 60),
+                arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 25) * 60),
+                durationMinutes: baseDuration + 25,
+                transfers: 2,
+                priceInCents: basePrice - 50,
+                status: .normal,
+                legs: [
+                    LiveTripLeg(
+                        mode: .bus,
+                        lineName: "Bus \(Int.random(in: 100...999))",
+                        lineNumber: "\(Int.random(in: 100...999))",
+                        operatorName: "Connexxion",
+                        direction: "Station",
+                        fromStation: from,
+                        toStation: "Local Station",
+                        departureTime: dateTime.addingTimeInterval(5 * 60),
+                        arrivalTime: dateTime.addingTimeInterval(15 * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: 10,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "LOW",
+                        intermediateStops: [],
+                        messages: []
+                    ),
+                    LiveTripLeg(
+                        mode: .train,
+                        lineName: "Sprinter",
+                        lineNumber: "SPR \(Int.random(in: 5000...9999))",
+                        operatorName: "NS",
+                        direction: "Rotterdam Centraal",
+                        fromStation: "Local Station",
+                        toStation: "Rotterdam Centraal",
+                        departureTime: dateTime.addingTimeInterval(20 * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 10) * 60),
+                        plannedDepartureTrack: "\(Int.random(in: 1...15))",
+                        actualDepartureTrack: "\(Int.random(in: 1...15))",
+                        plannedArrivalTrack: "\(Int.random(in: 1...15))",
+                        actualArrivalTrack: "\(Int.random(in: 1...15))",
+                        durationMinutes: baseDuration - 10,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "MEDIUM",
+                        intermediateStops: [],
+                        messages: []
+                    ),
+                    LiveTripLeg(
+                        mode: .mixed,
+                        lineName: "Tram 25",
+                        lineNumber: "25",
+                        operatorName: "RET",
+                        direction: to,
+                        fromStation: "Rotterdam Centraal",
+                        toStation: to,
+                        departureTime: dateTime.addingTimeInterval(Double(baseDuration + 15) * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 25) * 60),
+                        plannedDepartureTrack: nil,
+                        actualDepartureTrack: nil,
+                        plannedArrivalTrack: nil,
+                        actualArrivalTrack: nil,
+                        durationMinutes: 10,
+                        delayMinutes: 0,
+                        isCancelled: false,
+                        crowdForecast: "MEDIUM",
+                        intermediateStops: [],
+                        messages: []
+                    )
+                ],
+                crowdForecast: "MEDIUM",
+                isOptimal: false,
+                warnings: ["Demo data - configure NS API key for live results"]
+            ),
+            // Option 3: Train only (direct)
+            LiveTripResult(
+                from: from,
+                to: to,
+                departureTime: dateTime.addingTimeInterval(20 * 60),
+                arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 20) * 60),
+                durationMinutes: baseDuration,
+                transfers: 0,
+                priceInCents: basePrice,
+                status: .normal,
+                legs: [
+                    LiveTripLeg(
+                        mode: .train,
+                        lineName: "Intercity Direct",
+                        lineNumber: "IC \(Int.random(in: 1000...9999))",
+                        operatorName: "NS",
                         direction: to,
                         fromStation: from,
                         toStation: to,
-                        departureTime: dateTime.addingTimeInterval(30 * 60),
-                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 30) * 60),
+                        departureTime: dateTime.addingTimeInterval(20 * 60),
+                        arrivalTime: dateTime.addingTimeInterval(Double(baseDuration + 20) * 60),
                         plannedDepartureTrack: "\(Int.random(in: 1...15))",
                         actualDepartureTrack: "\(Int.random(in: 1...15))",
                         plannedArrivalTrack: "\(Int.random(in: 1...15))",
